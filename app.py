@@ -1,18 +1,14 @@
 import os
-import streamlit as st
 import re
+import json
 import json
 from datetime import datetime, timedelta
 import pytz
 from docx import Document  # For .docx
 import pandas as pd
 from bs4 import BeautifulSoup
-import json
-import yaml
 from pptx import Presentation
-from zipfile import ZipFile
-import mimetypes 
-import tempfile
+import streamlit as st
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.chains import ConversationalRetrievalChain
@@ -32,112 +28,57 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 def load_model():
     return ChatGroq(temperature=0.8, model="llama3-8b-8192")
 
-def clean_text(text):
-    # Replace multiple spaces with a single space
-    text = re.sub(r'\s+', ' ', text)
-    # Fix words broken by line breaks or formatting
-    # Matches a lowercase/uppercase word followed by a line break without a space
-    text = re.sub(r'(?<=[a-zA-Z])(?=[A-Z])', ' ', text)  # Add space between words when they are stuck together    
-    # Fix punctuation followed by words with no space
-    text = re.sub(r'(?<=[.,?!;])(?=[a-zA-Z])', ' ', text)  # Add space after punctuation if missing
-    # Standardize newlines for better formatting
-    text = re.sub(r'\.\s+', '.\n', text)  # Add newlines after sentences
-    text = re.sub(r'(?<=:)\s+', '\n', text)  # Add newlines after colons
-    # Additional cleanup (if needed)    text = text.strip()  # Remove leading and trailing whitespace
-    return text
-
 @st.cache_data
 def load_hidden_documents(directory="hidden_docs"):
     """Load all supported file types from a directory and return their content."""
     all_texts = []
 
+    # Check if the directory exists
+    if not os.path.exists(directory):
+        raise FileNotFoundError(f"The directory '{directory}' does not exist.")
+
+    # Iterate through all files in the directory
     for filename in os.listdir(directory):
         file_path = os.path.join(directory, filename)
-        mime_type, _ = mimetypes.guess_type(file_path)
 
-        try:
-            # Handle PDF files
-            if filename.endswith(".pdf"):
-                loader = PyPDFLoader(file_path)
-                pages = loader.load_and_split()
-                all_texts.extend([page.page_content for page in pages])
+        # Process only files (ignore directories)
+        if not os.path.isfile(file_path):
+            continue
 
-            # Handle Word files (.docx)
-            elif filename.endswith(".docx"):
-                doc = Document(file_path)
-                text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-                all_texts.append(text)
+        # Handle PDF files
+        if filename.endswith(".pdf"):
+            loader = PyPDFLoader(file_path)
+            pages = loader.load_and_split()
+            all_texts.extend([page.page_content for page in pages])
 
-            # Handle Text files (.txt)
-            elif filename.endswith(".txt"):
-                with open(file_path, "r", encoding="utf-8") as file:
-                    all_texts.append(file.read())
+        # Handle Word files (.docx)
+        elif filename.endswith(".docx"):
+            doc = Document(file_path)
+            text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+            all_texts.append(text)
 
-            # Handle Excel files (.xlsx and .xls)
-            elif filename.endswith(('.xlsx', '.xls')):
-                excel_data = pd.read_excel(file_path)
-                text = excel_data.to_string(index=False)
-                all_texts.append(text)
+        # Handle Text files (.txt)
+        elif filename.endswith(".txt"):
+            with open(file_path, "r", encoding="utf-8") as file:
+                all_texts.append(file.read())
 
-            # Handle CSV files (.csv)
-            elif filename.endswith(".csv"):
-                csv_data = pd.read_csv(file_path)
-                text = csv_data.to_string(index=False)
-                all_texts.append(text)
+        # Handle Excel files (.xlsx and .xls)
+        elif filename.endswith(('.xlsx', '.xls')):
+            excel_data = pd.read_excel(file_path)
+            text = excel_data.to_string(index=False)
+            all_texts.append(text)
 
-            # Handle Markdown files (.md)
-            elif filename.endswith(".md"):
-                with open(file_path, "r", encoding="utf-8") as file:
-                    all_texts.append(file.read())
+        # Handle PowerPoint files (.pptx)
+        elif filename.endswith(".pptx"):
+            presentation = Presentation(file_path)
+            slide_texts = []
+            for slide in presentation.slides:
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        slide_texts.append(shape.text)
+            all_texts.append("\n".join(slide_texts))
 
-            # Handle HTML files (.html, .htm)
-            elif filename.endswith(('.html', '.htm')):
-                with open(file_path, "r", encoding="utf-8") as file:
-                    soup = BeautifulSoup(file, "html.parser")
-                    all_texts.append(soup.get_text())
-
-            # Handle JSON files (.json)
-            elif filename.endswith(".json"):
-                with open(file_path, "r", encoding="utf-8") as file:
-                    data = json.load(file)
-                    all_texts.append(json.dumps(data, indent=2))
-
-            # Handle YAML files (.yaml, .yml)
-            elif filename.endswith(('.yaml', '.yml')):
-                with open(file_path, "r", encoding="utf-8") as file:
-                    data = yaml.safe_load(file)
-                    all_texts.append(json.dumps(data, indent=2))
-
-            # Handle PowerPoint files (.pptx)
-            elif filename.endswith(".pptx"):
-                presentation = Presentation(file_path)
-                for slide in presentation.slides:
-                    slide_text = []
-                    for shape in slide.shapes:
-                        if shape.has_text_frame:
-                            slide_text.append(shape.text)
-                    all_texts.append("\n".join(slide_text))
-
-            # Handle ZIP files (.zip)
-            elif filename.endswith(".zip"):
-                with ZipFile(file_path, 'r') as zip_ref:
-                    zip_ref.extractall("temp_extracted")
-                    all_texts.extend(load_hidden_documents("temp_extracted"))
-
-            # Handle Log files (.log)
-            elif filename.endswith(".log"):
-                with open(file_path, "r", encoding="utf-8") as file:
-                    all_texts.append(file.read())
-
-            # Handle unknown file types (fallback to text-based reading)
-            elif mime_type and mime_type.startswith("text"):
-                with open(file_path, "r", encoding="utf-8") as file:
-                    all_texts.append(file.read())
-
-        except Exception as e:
-            print(f"Failed to process {filename}: {e}")
-    cleaned_texts = [clean_text(text) for text in all_texts]
-    return cleaned_texts
+    return all_texts
 
 @st.cache_data
 def save_to_supabase(all_texts):
@@ -197,7 +138,7 @@ vector_store = reload_vector_store_if_needed()
 # If still None, raise an error to debug initialization
 if vector_store is None:
     raise ValueError("Failed to initialize vector_store. Ensure hidden_docs folder and embeddings setup are correct.")
-##### my email lalitmach22@gmail.com
+##### my email lalitmach22@gmail.com 21f3001013@ds.study.iitm.ac.in
 # Validate email
 def is_valid_email(email):
     email_regex = r"^\d{2}f\d{7}@ds\.study\.iitm\.ac\.in$"
@@ -229,7 +170,7 @@ def save_session_to_supabase(email, name, chat_history):
 # Streamlit app
 st.title("BDM Chatbot")
 st.write("Developed by Lalit & Puneet, students of BS (Applications & Data Science) IIT Madras")
-st.write("We encourage you to ask clear and relevant questions to ensure meaningful responses. Remember, Garbage In, Garbage Out.")
+st.write("We encourage you to ask clear and relevant questions about BDM project only to ensure meaningful responses. Remember, Garbage In, Garbage Out.")
 st.write("Once you have completed your queries, kindly conclude with the word stop.")
 st.write("Disclaimer: All interactions, including questions and answers, are recorded to help us enhance the bot's functionality. By using this chatbot, you agree to the storage of this data.")
 st.write("Disclaimer: While this chatbot strives to provide accurate responses, it may occasionally make errors. For verified and comprehensive information, please refer to the official project documents or consult the appropriate team members/mentors.")
